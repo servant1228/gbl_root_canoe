@@ -1,0 +1,14 @@
+## @file
+#  Package description for standalone Tetris EFI application.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  DEC_SPECIFICATION              = 0x00010005
+  PACKAGE_NAME                   = TetrisPkg
+  PACKAGE_GUID                   = c7fa37a5-9b29-4d2d-a5a2-5ac4a21fda61
+  PACKAGE_VERSION                = 0.1
+
+[Includes]
+  Include

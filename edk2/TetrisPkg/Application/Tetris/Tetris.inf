@@ -1,0 +1,34 @@
+## @file
+#  Standalone Tetris UEFI application for GOP-based displays.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010006
+  BASE_NAME                      = Tetris
+  FILE_GUID                      = 8f0b6586-785e-4cf6-8a8b-68e2302b1ac8
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  Tetris.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  TetrisPkg/TetrisPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid
+
+[Depex]
+  TRUE
