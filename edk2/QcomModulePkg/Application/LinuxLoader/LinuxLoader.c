@@ -940,8 +940,8 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     return EFI_SUCCESS;
   }
 
-  //wait for 5 sec for key press
-  INT8 KeyStatus = WaitForVolumeDownKey (5000);
+  //wait for 3 sec for key press
+  INT8 KeyStatus = WaitForVolumeDownKey (3000);
   if(KeyStatus == 1) {
     Print(L"Entering Fastboot mode...\n");
   } else {
