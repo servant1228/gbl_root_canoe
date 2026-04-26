@@ -33,7 +33,7 @@ build: patch
 	ls -l ./dist
 dist: build
 	mkdir release
-	zip -j release/$(DIST_NAME).zip dist/ABL_with_superfastboot.efi
+	zip -j release/$(DIST_NAME).zip dist/ABL_with_superfastboot.efi dist/patch_log.txt
 
 build_superfbonly: clean
 	cp -r ./Conf ./edk2/
