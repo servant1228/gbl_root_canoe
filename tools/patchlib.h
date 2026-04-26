@@ -270,26 +270,18 @@ static INT32 track_forward_patch_strb(CHAR8* buffer, INT32 size, INT32 ldrb_off,
                         off, si.rt, si.rn, si.imm, anchor_off);
                     }
                     #endif
-                    Print_patcher("  Before: %02X %02X %02X %02X\n",
-                           (UINT8)buffer[off], (UINT8)buffer[off+1],
-                           (UINT8)buffer[off+2], (UINT8)buffer[off+3]);
 
-                    write_instr(buffer, off, strb_with_reg(d.raw, 31));
+                    /* Patch: Rt -> WZR (31) */
+                    UINT32 patched_raw = (d.raw & ~0x1F) | 0x1F;
+                    write_instr(buffer, off, patched_raw);
 
-                    Print_patcher("  After : %02X %02X %02X %02X (Rt -> WZR)\n",
-                           (UINT8)buffer[off], (UINT8)buffer[off+1],
-                           (UINT8)buffer[off+2], (UINT8)buffer[off+3]);
-                    return 1;
-                } else {
-                    Print_patcher("  0x%X: STRB W%d,[X%d,#0x%X] before anchor -> spill8\n",
-                           off, si.rt, si.rn, si.imm);
-                    if (si.rn == 31) locset_add_stk8(&set, si.imm);
-                    locset_print(&set);
+                    #ifndef DISABLE_PRINT
+                    Print_patcher("  Before: %08X\n", d.raw);
+                    Print_patcher("  After : %08X (Rt -> WZR)\n", patched_raw);
+                    Print_patcher("Sink patched successfully.\n");
+                    #endif
+                    return 0;
                 }
-            } else if (si.valid && si.rn == 31 && locset_has_stk8(&set, si.imm)) {
-                Print_patcher("  0x%X: STRB W%d,[SP,#0x%X] overwrite stk8 -> del\n",
-                       off, si.rt, si.imm);
-                locset_del_stk8(&set, si.imm);
             }
             break;
         }
@@ -298,117 +290,58 @@ static INT32 track_forward_patch_strb(CHAR8* buffer, INT32 size, INT32 ldrb_off,
             break;
         }
     }
-
-    Print_patcher("Forward tracking: no sink STRB found after anchor 0x%X\n", anchor_off);
     return -1;
 }
 
-/* ============================================================
- *  第十二部分：反向找 LDRB 源头
- * ============================================================ */
-INT32 find_ldrB_instructio_reverse(CHAR8* buffer, INT32 size,
-                                   INT32 anchor_offset, INT8 target_register) {
-    INT32 now_offset = anchor_offset - 4;
-    INT8 current_target = target_register;
-    INT32 bounce_count = 0;
-    const INT32 MAX_BOUNCES = 8;
-
-    while (now_offset >= 0) {
-        DecodedInst d = decode_at(buffer, now_offset);
-
-        if (d.type == INST_PACIASP) {
-            Print_patcher("Reached function start at 0x%X\n", now_offset);
-            break;
-        }
-
-        /* ---- 64-bit 栈 reload 弹跳 ---- */
-        if (d.type == INST_LDR_X_IMM && d.rn == 31 && (INT8)d.rt == current_target) {
-            UINT32 spill_imm = d.imm;
-            Print_patcher("Bounce at 0x%X: LDR X%d,[SP,#0x%X]\n",
-                   now_offset, (int)current_target, spill_imm);
-            INT32 search = now_offset - 4;
-            BOOLEAN found = FALSE;
-            while (search >= 0) {
-                DecodedInst ds = decode_at(buffer, search);
-                if (ds.type == INST_PACIASP) break;
-                if (ds.type == INST_STR_X_IMM && ds.rn == 31 && ds.imm == spill_imm) {
-                    Print_patcher("  -> STR X%d,[SP,#0x%X] at 0x%X\n",
-                           (INT32)ds.rt, spill_imm, search);
-                    current_target = (INT8)ds.rt;
-                    now_offset = search - 4;
-                    found = TRUE;
-                    bounce_count++;
-                    break;
-                }
-                search -= 4;
-            }
-            if (!found) { Print_patcher("  -> No matching STR, abort\n"); return -1; }
-            if (bounce_count > MAX_BOUNCES) { Print_patcher("Too many bounces\n"); return -1; }
-            continue;
-        }
-
-        /* ---- byte 级栈 reload 弹跳 ---- */
-        if (d.type == INST_LDRB_IMM && d.rn == 31 && (INT8)d.rt == current_target) {
-            UINT32 byte_imm = d.imm;
-            Print_patcher("Byte bounce at 0x%X: LDRB W%d,[SP,#0x%X]\n",
-                   now_offset, (int)current_target, byte_imm);
-            INT32 search = now_offset - 4;
-            BOOLEAN found = FALSE;
-            while (search >= 0) {
-                DecodedInst ds = decode_at(buffer, search);
-                if (ds.type == INST_PACIASP) break;
-                if (ds.type == INST_STRB_IMM && ds.rn == 31 && ds.imm == byte_imm) {
-                    Print_patcher("  -> STRB W%d,[SP,#0x%X] at 0x%X\n",
-                           (INT32)ds.rt, byte_imm, search);
-                    current_target = (INT8)ds.rt;
-                    now_offset = search - 4;
-                    found = TRUE;
-                    bounce_count++;
-                    break;
-                }
-                search -= 4;
-            }
-            if (!found) { Print_patcher("  -> No matching STRB, abort\n"); return -1; }
-            if (bounce_count > MAX_BOUNCES) { Print_patcher("Too many bounces\n"); return -1; }
-            continue;
-        }
-
-        /* ---- 真正源头: LDRB W{current_target}, [Xn!=SP, #imm] ---- */
-        if (d.type == INST_LDRB_IMM && (INT8)d.rt == current_target && d.rn != 31) {
+INT32 find_ldrB_instructio_reverse(CHAR8* buffer, INT32 size, INT32 anchor_off, INT8 lock_register_num) {
+    for (INT32 i = anchor_off - 4; i >= 0; i -= 4) {
+        DecodedInst d = decode_at(buffer, i);
+        if (d.type == INST_LDRB_IMM && d.rt == (UINT8)lock_register_num) {
             Print_patcher("Found source LDRB at 0x%X: LDRB W%d,[X%d,#0x%X](%d bounces)\n",
-                   now_offset, d.rt, d.rn, d.imm, bounce_count);
+                   i, d.rt, d.rn, d.imm, 0);
+
+            #ifndef DISABLE_PRINT
             Print_patcher("  Before: %02X %02X %02X %02X\n",
-                   (UINT8)buffer[now_offset], (UINT8)buffer[now_offset+1],
-                   (UINT8)buffer[now_offset+2], (UINT8)buffer[now_offset+3]);
-            #ifndef DISABLE_PATCH_4
-            write_instr(buffer, now_offset, encode_movz_w((UINT8)current_target, 1));
+                   (UINT8)buffer[i], (UINT8)buffer[i+1], (UINT8)buffer[i+2], (UINT8)buffer[i+3]);
+            #endif
+
+            /* Patch: LDRB Wt, [Xn, #imm] -> MOV Wt, #1 (0x52800020 | t) */
+            UINT32 mov_instr = 0x52800020 | (UINT32)d.rt;
+            write_instr(buffer, i, mov_instr);
+
+            #ifndef DISABLE_PRINT
             Print_patcher("  After : %02X %02X %02X %02X (MOV W%d, #1)\n",
-                   (UINT8)buffer[now_offset], (UINT8)buffer[now_offset+1],
-                   (UINT8)buffer[now_offset+2], (UINT8)buffer[now_offset+3],
-                   (int)current_target);
+                   (UINT8)buffer[i], (UINT8)buffer[i+1], (UINT8)buffer[i+2], (UINT8)buffer[i+3], (int)d.rt);
             #endif
-            #ifndef DISABLE_PATCH_5
-            INT32 fwd = track_forward_patch_strb(buffer, size, now_offset,
-                                                  current_target, anchor_offset);
-            if (fwd <= 0) {
-                Print_patcher("Warning: sink STRB not found after anchor 0x%X\n", anchor_offset);
-                return -1;
-            }
-            Print_patcher("Sink patched successfully.\n");
-            #endif
+
+            track_forward_patch_strb(buffer, size, i, (INT8)d.rt, anchor_off);
             return 0;
         }
-
-        now_offset -= 4;
     }
     return -1;
 }
 
 static BOOLEAN str_at(const CHAR8* buffer, INT32 size, INT64 file_off, const CHAR8* needle) {
-    if (file_off < 0) return FALSE;
-    INT32 len = strlen(needle);
-    if ((INT32)file_off + len >= size) return FALSE;
+    if (file_off < 0 || file_off >= size) return FALSE;
+    INT32 len = 0;
+    while (needle[len]) len++;
+    if (file_off + len > size) return FALSE;
     return memcmp_patcher(buffer + file_off, needle, len) == 0;
+}
+
+static BOOLEAN rewrite_cbz_as_b(CHAR8* buffer, INT32 cbz_off) {
+    UINT32 raw = 0;
+    INT32 imm19;
+    UINT32 branch;
+
+    memcpy_patcher(&raw, buffer + cbz_off, 4);
+    imm19 = (INT32)((raw >> 5) & 0x7FFFF);
+    if (imm19 & 0x40000)
+        imm19 |= ~0x7FFFF;
+
+    branch = 0x14000000U | ((UINT32)imm19 & 0x03FFFFFFU);
+    write_instr(buffer, cbz_off, branch);
+    return TRUE;
 }
 
 static INT64 calc_adrl_file_offset(const CHAR8* buffer, INT32 adrp_off, UINT64 load_base) {
@@ -437,34 +370,40 @@ static INT64 calc_adrl_file_offset(const CHAR8* buffer, INT32 adrp_off, UINT64 l
  *       FUN_00031560();               // ShowDeviceStatetoscreen
  *   }
  *
- * The guard is: CBZ Wt, +#0x8c  — skips the block when locked (Wt==0).
- * We turn it into B +#0x8c — unconditionally skip regardless of lock state.
+ * The guard is a CBZ that skips the block when locked (Wt==0).
+ * We rewrite that guard as an unconditional B, so the whole block is skipped
+ * regardless of lock state.
  *
  * Anchor: the unique 8-byte sequence ending with the CBZ:
  *   36 31 88 1A  (AND/CSEL before the branch)
- *   ?? 04 00 34  (CBZ Wt, +#0x8c — Rt field varies, upper 3 bytes fixed)
+ *   ?? 04 00 34  (CBZ Wt, +#imm — Rt field varies, upper 3 bytes fixed)
  *
- * Patch: overwrite the CBZ with B +#0x8c (0x14000023, LE: 23 00 00 14).
+ * Fallback anchor: the countdown loop inside the warning block.
+ * This is the same branch targeted by the older "hide unlock prompt" patch;
+ * it does not skip an unlock menu, it skips the orange warning block.
  */
 INT32 patch_orange_state_screen(CHAR8* buffer, INT32 size) {
-    /* Fixed bytes: preceding instruction + CBZ upper 3 bytes (imm19 + opcode) */
     static const UINT8 anchor[] = { 0x36, 0x31, 0x88, 0x1A };
-    static const UINT8 cbz_hi[] = { 0x04, 0x00, 0x34 };          /* bytes [1..3] of CBZ */
-    /* B +#0x8c = 0x14000023 */
-    static const UINT8 b_patch[] = { 0x23, 0x00, 0x00, 0x14 };
+    static const UINT8 cbz_hi[] = { 0x04, 0x00, 0x34 };
+    static const INT16 delay_anchor[] = {
+        -1, 0x06, 0x80, 0x52,
+        -1, 0x00, 0x00, -1,
+        -1, 0x05, -1, -1
+    };
 
     INT32 patched = 0;
+
     for (INT32 i = 0; i <= size - 8; i += 4) {
         if (memcmp_patcher(buffer + i,     anchor, 4) != 0) continue;
         if (memcmp_patcher(buffer + i + 5, cbz_hi, 3) != 0) continue;
         #ifndef DISABLE_PRINT
-        Print_patcher("Patch 7: orange state CBZ at 0x%X  W%d -> B +#0x8c\n",
+        Print_patcher("Patch 7: orange state CBZ at 0x%X  W%d -> B\n",
                       i + 4, (int)((UINT8)buffer[i + 4] & 0x1F));
         Print_patcher("  Before: %02X %02X %02X %02X\n",
                       (UINT8)buffer[i+4], (UINT8)buffer[i+5],
                       (UINT8)buffer[i+6], (UINT8)buffer[i+7]);
         #endif
-        memcpy_patcher(buffer + i + 4, b_patch, 4);
+        rewrite_cbz_as_b(buffer, i + 4);
         #ifndef DISABLE_PRINT
         Print_patcher("  After : %02X %02X %02X %02X\n",
                       (UINT8)buffer[i+4], (UINT8)buffer[i+5],
@@ -472,6 +411,39 @@ INT32 patch_orange_state_screen(CHAR8* buffer, INT32 size) {
         #endif
         patched++;
     }
+
+    if (patched == 0) {
+        INT32 pattern_len = sizeof(delay_anchor) / sizeof(INT16);
+
+        for (INT32 i = 0; i <= size - pattern_len; ++i) {
+            BOOLEAN match = TRUE;
+            for (INT32 j = 0; j < pattern_len; ++j) {
+                if (delay_anchor[j] != -1 &&
+                    (UINT8)buffer[i + j] != (UINT8)delay_anchor[j]) {
+                    match = FALSE;
+                    break;
+                }
+            }
+            if (!match || i < 4)
+                continue;
+
+            #ifndef DISABLE_PRINT
+            Print_patcher("Patch 7 fallback: orange state CBZ at 0x%X -> B\n", i - 4);
+            Print_patcher("  Before: %02X %02X %02X %02X\n",
+                          (UINT8)buffer[i-4], (UINT8)buffer[i-3],
+                          (UINT8)buffer[i-2], (UINT8)buffer[i-1]);
+            #endif
+            rewrite_cbz_as_b(buffer, i - 4);
+            #ifndef DISABLE_PRINT
+            Print_patcher("  After : %02X %02X %02X %02X\n",
+                          (UINT8)buffer[i-4], (UINT8)buffer[i-3],
+                          (UINT8)buffer[i-2], (UINT8)buffer[i-1]);
+            #endif
+            patched++;
+            break;
+        }
+    }
+
     #ifndef DISABLE_PRINT
     if (patched == 0)
         Print_patcher("Patch 7: orange state CBZ not found\n");
